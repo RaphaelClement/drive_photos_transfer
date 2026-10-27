@@ -1,0 +1,20 @@
+{
+  "date_start": "2025-09-08",
+  "date_end": "2026-07-15",
+  "drive_sources": {
+    "Drive_A": "G:\\Mon Drive\\Photos",
+    "Drive_B": "H:\\Mon Drive\\Photos",
+    "Drive_C": "I:\\Mon Drive\\Photos"
+  },
+  "drive_destination": "J:\\Mon Drive\\Photos_2025_2026",
+  "amazon_photos": {
+    "enabled": true,
+    "tld": "fr",
+    "cookies": {
+      "session-id": "REMPLACER_PAR_VOTRE_SESSION_ID",
+      "ubid-acbfr": "REMPLACER_PAR_VOTRE_UBID_ACBFR",
+      "at-acbfr": "REMPLACER_PAR_VOTRE_AT_ACBFR"
+    }
+  },
+  "report_csv": "rapport_transfert.csv"
+}
