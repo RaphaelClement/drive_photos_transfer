@@ -310,27 +310,50 @@ def elect_winners(all_candidates: List[MediaCandidate]) -> List[ElectionResult]:
     return results
 
 
-def index_existing_destination(dest_folder: Path) -> Dict[Tuple[str, str], Tuple[Path, int]]:
+def index_existing_destination(dest_folder: Path) -> Dict[Tuple[str, str], List[Tuple[Path, int]]]:
     """
-    Inspecte le dossier cible sur le Drive D (à plat) pour connaître les fichiers déjà présents.
-    Retourne un dictionnaire : (base_name_key, category) -> (chemin_existant, taille_octets).
+    Parcourt RÉCURSIVEMENT le dossier cible sur le Drive D (y compris tous ses sous-dossiers)
+    pour connaître toutes les photos/vidéos déjà présentes sur le Drive D.
+    Retourne un dictionnaire :
+      (base_name_key, category) -> Liste de (chemin_existant, taille_octets) triée du plus lourd au plus léger.
     """
-    existing: Dict[Tuple[str, str], Tuple[Path, int]] = {}
+    existing: Dict[Tuple[str, str], List[Tuple[Path, int]]] = {}
     if not dest_folder.exists():
         return existing
 
-    with os.scandir(dest_folder) as entries:
-        for entry in entries:
-            if not entry.is_file(follow_symlinks=False):
-                continue
-            base_name, ext = os.path.splitext(entry.name)
-            category = classify_extension(ext)
-            if not category:
-                continue
-            size_bytes = entry.stat(follow_symlinks=False).st_size
-            key = (base_name.lower(), category)
-            existing[key] = (Path(entry.path), size_bytes)
+    print(f"[SCAN] Indexation récursive des fichiers déjà présents dans le Drive D ({dest_folder}) ...")
+    stack = [dest_folder]
+    total_found = 0
 
+    while stack:
+        current_dir = stack.pop()
+        try:
+            with os.scandir(current_dir) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(Path(entry.path))
+                        elif entry.is_file(follow_symlinks=False):
+                            if entry.name.startswith(".tmp_"):
+                                continue
+                            base_name, ext = os.path.splitext(entry.name)
+                            category = classify_extension(ext)
+                            if not category:
+                                continue
+                            size_bytes = entry.stat(follow_symlinks=False).st_size
+                            key = (base_name.lower(), category)
+                            existing.setdefault(key, []).append((Path(entry.path), size_bytes))
+                            total_found += 1
+                    except OSError as err:
+                        print(f"  [Erreur lecture entrée Drive D] {entry.path}: {err}")
+        except OSError as err:
+            print(f"  [Erreur accès sous-dossier Drive D] {current_dir}: {err}")
+
+    # Tri décroissant par taille pour chaque clé afin que le meilleur exemplaire déjà dans D soit en position 0
+    for key in existing:
+        existing[key].sort(key=lambda item: item[1], reverse=True)
+
+    print(f"  -> {total_found} médias déjà présents détectés dans le Drive D (sous-dossiers inclus).")
     return existing
 
 
@@ -341,7 +364,8 @@ def execute_transfers(
     dry_run: bool,
 ) -> None:
     """
-    Copie ou télécharge uniquement les gagnants vers le Drive D, sans jamais créer de conflit de nom.
+    Copie ou télécharge uniquement les gagnants vers le Drive D, sans jamais créer de conflit de nom,
+    en tenant compte des fichiers déjà présents dans les sous-dossiers du Drive D.
     """
     if not dry_run:
         dest_folder.mkdir(parents=True, exist_ok=True)
@@ -358,22 +382,34 @@ def execute_transfers(
 
     for item in tqdm(elections, desc="Progression", unit="média"):
         winner = item.winner
-        target_path = dest_folder / winner.filename
+        existing_list = existing_in_d.get(item.key, [])
 
-        # Vérifie si ce média (même nom de base + même catégorie) existe déjà dans D
-        existing_entry = existing_in_d.get(item.key)
-        if existing_entry is not None:
-            existing_path, existing_size = existing_entry
-            if existing_size >= winner.size_bytes:
+        # Vérifie si ce média (même nom de base + même catégorie) existe déjà dans D (ou un sous-dossier de D)
+        if existing_list:
+            best_existing_path, best_existing_size = existing_list[0]
+            if best_existing_size >= winner.size_bytes:
                 item.action = "SKIP_ALREADY_IN_D"
-                item.notes = f"Déjà présent dans D avec taille >= ({existing_size} octets)"
+                rel_loc = best_existing_path.relative_to(dest_folder) if best_existing_path.is_relative_to(dest_folder) else best_existing_path
+                item.notes = f"Déjà présent dans D ({rel_loc}) avec taille >= ({best_existing_size} octets)"
                 skipped_count += 1
                 continue
+            # Si une version moins bonne existait dans un sous-dossier de D, on la remplacera au même endroit !
+            target_dir = best_existing_path.parent
+        else:
+            # Nouveau fichier absent de D : copié à la racine de dest_folder
+            target_dir = dest_folder
+
+        target_path = target_dir / winner.filename
 
         if dry_run:
-            if existing_entry is not None:
+            if existing_list:
+                best_existing_path, best_existing_size = existing_list[0]
+                rel_loc = best_existing_path.relative_to(dest_folder) if best_existing_path.is_relative_to(dest_folder) else best_existing_path
                 item.action = "DRY_RUN_WOULD_REPLACE"
-                item.notes = f"Remplacerait {existing_entry[0].name} ({existing_entry[1]} octets) par {winner.filename} ({winner.size_bytes} octets)"
+                item.notes = (
+                    f"Remplacerait {rel_loc} ({best_existing_size} octets) "
+                    f"par {winner.filename} ({winner.size_bytes} octets) depuis {winner.source_name}"
+                )
                 replaced_count += 1
             else:
                 item.action = "DRY_RUN_WOULD_COPY"
@@ -381,17 +417,16 @@ def execute_transfers(
                 copied_count += 1
             continue
 
-        # Mode réel : si une version plus légère existe déjà dans D, on la supprime d'abord
-        # pour qu'il n'y ait JAMAIS deux fichiers du même nom au même instant T dans D.
+        # Mode réel : si une ou plusieurs versions plus légères existent déjà dans D (et ses sous-dossiers),
+        # on les supprime d'abord pour qu'il n'y ait JAMAIS deux fichiers du même nom dans D.
         try:
-            if existing_entry is not None:
-                old_path, old_size = existing_entry
+            for old_path, _ in existing_list:
                 if old_path.exists():
                     old_path.unlink()
 
             if winner.local_path is not None:
-                # Copie atomique via un fichier temporaire dans le dossier de destination
-                temp_target = dest_folder / f".tmp_{winner.filename}"
+                # Copie atomique via un fichier temporaire dans le dossier cible
+                temp_target = target_dir / f".tmp_{winner.filename}"
                 shutil.copy2(winner.local_path, temp_target)
                 os.replace(temp_target, target_path)
             elif winner.amazon_node_id is not None and ap_client is not None:
@@ -405,9 +440,11 @@ def execute_transfers(
                         )
                     shutil.move(str(downloaded_files[0]), str(target_path))
 
-            if existing_entry is not None:
+            if existing_list:
+                best_existing_path, best_existing_size = existing_list[0]
+                rel_loc = best_existing_path.relative_to(dest_folder) if best_existing_path.is_relative_to(dest_folder) else best_existing_path
                 item.action = "REPLACED_IN_D"
-                item.notes = f"Ancienne version ({existing_entry[1]} octets) supprimée puis remplacée"
+                item.notes = f"Ancienne version ({rel_loc}, {best_existing_size} octets) supprimée puis remplacée au même endroit"
                 replaced_count += 1
             else:
                 item.action = "COPIED_TO_D"
