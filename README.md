@@ -85,3 +85,29 @@ Une fois satisfait du rapport de simulation, lancez le transfert réel :
 ```powershell
 python transfer_photos.py
 ```
+
+---
+
+## Script 2 : Rechercher précisément des photos par leur nom et les copier dans `Téléchargements` (`find_and_download.py`)
+
+La barre de recherche du site web Amazon Photos retrouve très mal les noms de fichiers exacts. Si certaines photos ont rencontré une erreur ou si vous voulez récupérer une liste précise de photos dans leur meilleure qualité vers le dossier **Téléchargements** du PC :
+
+### Option A — Mode interactif (le plus simple : collez 1 nom ou vos 40 noms d'un coup)
+```powershell
+python find_and_download.py
+```
+*(Collez vos noms un par ligne puis appuyez deux fois sur Entrée, ou tapez simplement `erreurs` pour qu'il lise tout seul les lignes `ERROR` de `rapport_transfert.csv` !)*
+
+### Option B — Récupérer automatiquement toutes les erreurs de `rapport_transfert.csv`
+```powershell
+python find_and_download.py --from-report
+```
+
+### Option C — Depuis un fichier texte ou directement en ligne de commande
+```powershell
+python find_and_download.py IMG_1234.JPG IMG_5678.HEIC
+# ou depuis un fichier texte (1 nom par ligne) :
+python find_and_download.py --file liste_photos.txt
+```
+*(Ajoutez `--amazon-only` si vous voulez chercher uniquement sur Amazon Photos sans vérifier les Drives A, B, C).*
+
